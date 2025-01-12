@@ -1,14 +1,4 @@
-"""
-NOTE:
-    the below code is to be maintained Python 2.x-compatible
-    as the whole Cookiecutter Django project initialization
-    can potentially be run in Python 2.x environment
-    (at least so we presume in `pre_gen_project.py`).
-
-TODO: ? restrict Cookiecutter Django project initialization to Python 3.x environments only
-"""
-from __future__ import print_function
-
+import json
 import os
 import random
 import shutil
@@ -43,6 +33,24 @@ def remove_gplv3_files():
         os.remove(file_name)
 
 
+def remove_custom_user_manager_files():
+    os.remove(
+        os.path.join(
+            "{{cookiecutter.project_slug}}",
+            "users",
+            "managers.py",
+        )
+    )
+    os.remove(
+        os.path.join(
+            "{{cookiecutter.project_slug}}",
+            "users",
+            "tests",
+            "test_managers.py",
+        )
+    )
+
+
 def remove_pycharm_files():
     idea_dir_path = ".idea"
     if os.path.exists(idea_dir_path):
@@ -54,11 +62,25 @@ def remove_pycharm_files():
 
 
 def remove_docker_files():
+    shutil.rmtree(".devcontainer")
     shutil.rmtree("compose")
 
-    file_names = ["local.yml", "production.yml", ".dockerignore"]
+    file_names = [
+        "docker-compose.local.yml",
+        "docker-compose.production.yml",
+        ".dockerignore",
+        "justfile",
+    ]
     for file_name in file_names:
         os.remove(file_name)
+    if "{{ cookiecutter.editor }}" == "PyCharm":
+        file_names = ["docker_compose_up_django.xml", "docker_compose_up_docs.xml"]
+        for file_name in file_names:
+            os.remove(os.path.join(".idea", "runConfigurations", file_name))
+
+
+def remove_nginx_docker_files():
+    shutil.rmtree(os.path.join("compose", "production", "nginx"))
 
 
 def remove_utility_files():
@@ -68,24 +90,37 @@ def remove_utility_files():
 def remove_heroku_files():
     file_names = ["Procfile", "runtime.txt", "requirements.txt"]
     for file_name in file_names:
-        if (
-            file_name == "requirements.txt"
-            and "{{ cookiecutter.ci_tool }}".lower() == "travis"
-        ):
+        if file_name == "requirements.txt" and "{{ cookiecutter.ci_tool }}".lower() == "travis":
             # don't remove the file if we are using travisci but not using heroku
             continue
         os.remove(file_name)
-    remove_heroku_build_hooks()
-
-
-def remove_heroku_build_hooks():
     shutil.rmtree("bin")
 
 
+def remove_sass_files():
+    shutil.rmtree(os.path.join("{{cookiecutter.project_slug}}", "static", "sass"))
+
+
 def remove_gulp_files():
-    file_names = ["gulpfile.js"]
+    file_names = ["gulpfile.mjs"]
     for file_name in file_names:
         os.remove(file_name)
+
+
+def remove_webpack_files():
+    shutil.rmtree("webpack")
+    remove_vendors_js()
+
+
+def remove_vendors_js():
+    vendors_js_path = os.path.join(
+        "{{ cookiecutter.project_slug }}",
+        "static",
+        "js",
+        "vendors.js",
+    )
+    if os.path.exists(vendors_js_path):
+        os.remove(vendors_js_path)
 
 
 def remove_packagejson_file():
@@ -94,13 +129,105 @@ def remove_packagejson_file():
         os.remove(file_name)
 
 
+def update_package_json(remove_dev_deps=None, remove_keys=None, scripts=None):
+    remove_dev_deps = remove_dev_deps or []
+    remove_keys = remove_keys or []
+    scripts = scripts or {}
+    with open("package.json", mode="r") as fd:
+        content = json.load(fd)
+    for package_name in remove_dev_deps:
+        content["devDependencies"].pop(package_name)
+    for key in remove_keys:
+        content.pop(key)
+    content["scripts"].update(scripts)
+    with open("package.json", mode="w") as fd:
+        json.dump(content, fd, ensure_ascii=False, indent=2)
+        fd.write("\n")
+
+
+def handle_js_runner(choice, use_docker, use_async):
+    if choice == "Gulp":
+        update_package_json(
+            remove_dev_deps=[
+                "@babel/core",
+                "@babel/preset-env",
+                "babel-loader",
+                "concurrently",
+                "css-loader",
+                "mini-css-extract-plugin",
+                "postcss-loader",
+                "postcss-preset-env",
+                "sass-loader",
+                "webpack",
+                "webpack-bundle-tracker",
+                "webpack-cli",
+                "webpack-dev-server",
+                "webpack-merge",
+            ],
+            remove_keys=["babel"],
+            scripts={
+                "dev": "gulp",
+                "build": "gulp build",
+            },
+        )
+        remove_webpack_files()
+    elif choice == "Webpack":
+        scripts = {
+            "dev": "webpack serve --config webpack/dev.config.js",
+            "build": "webpack --config webpack/prod.config.js",
+        }
+        remove_dev_deps = [
+            "browser-sync",
+            "cssnano",
+            "gulp",
+            "gulp-concat",
+            "gulp-imagemin",
+            "gulp-plumber",
+            "gulp-postcss",
+            "gulp-rename",
+            "gulp-sass",
+            "gulp-uglify-es",
+        ]
+        if not use_docker:
+            dev_django_cmd = (
+                "uvicorn config.asgi:application --reload" if use_async else "python manage.py runserver_plus"
+            )
+            scripts.update(
+                {
+                    "dev": "concurrently npm:dev:*",
+                    "dev:webpack": "webpack serve --config webpack/dev.config.js",
+                    "dev:django": dev_django_cmd,
+                }
+            )
+        else:
+            remove_dev_deps.append("concurrently")
+        update_package_json(remove_dev_deps=remove_dev_deps, scripts=scripts)
+        remove_gulp_files()
+
+
+def remove_prettier_pre_commit():
+    with open(".pre-commit-config.yaml", "r") as fd:
+        content = fd.readlines()
+
+    removing = False
+    new_lines = []
+    for line in content:
+        if removing and "- repo:" in line:
+            removing = False
+        if "mirrors-prettier" in line:
+            removing = True
+        if not removing:
+            new_lines.append(line)
+
+    with open(".pre-commit-config.yaml", "w") as fd:
+        fd.writelines(new_lines)
+
+
 def remove_celery_files():
     file_names = [
         os.path.join("config", "celery_app.py"),
         os.path.join("{{ cookiecutter.project_slug }}", "users", "tasks.py"),
-        os.path.join(
-            "{{ cookiecutter.project_slug }}", "users", "tests", "test_tasks.py"
-        ),
+        os.path.join("{{ cookiecutter.project_slug }}", "users", "tests", "test_tasks.py"),
     ]
     for file_name in file_names:
         os.remove(file_name)
@@ -127,16 +254,11 @@ def remove_dotgithub_folder():
     shutil.rmtree(".github")
 
 
-def append_to_project_gitignore(path):
-    gitignore_file_path = ".gitignore"
-    with open(gitignore_file_path, "a") as gitignore_file:
-        gitignore_file.write(path)
-        gitignore_file.write(os.linesep)
+def remove_dotdrone_file():
+    os.remove(".drone.yml")
 
 
-def generate_random_string(
-    length, using_digits=False, using_ascii_letters=False, using_punctuation=False
-):
+def generate_random_string(length, using_digits=False, using_ascii_letters=False, using_punctuation=False):
     """
     Example:
         opting out for 50 symbol-long, [a-z][A-Z][0-9] string
@@ -164,8 +286,8 @@ def set_flag(file_path, flag, value=None, formatted=None, *args, **kwargs):
         random_string = generate_random_string(*args, **kwargs)
         if random_string is None:
             print(
-                "We couldn't find a secure pseudo-random number generator on your system. "
-                "Please, make sure to manually {} later.".format(flag)
+                "We couldn't find a secure pseudo-random number generator on your "
+                "system. Please, make sure to manually {} later.".format(flag)
             )
             random_string = flag
         if formatted is not None:
@@ -230,9 +352,7 @@ def set_postgres_password(file_path, value=None):
 
 
 def set_celery_flower_user(file_path, value):
-    celery_flower_user = set_flag(
-        file_path, "!!!SET CELERY_FLOWER_USER!!!", value=value
-    )
+    celery_flower_user = set_flag(file_path, "!!!SET CELERY_FLOWER_USER!!!", value=value)
     return celery_flower_user
 
 
@@ -248,10 +368,10 @@ def set_celery_flower_password(file_path, value=None):
     return celery_flower_password
 
 
-def append_to_gitignore_file(s):
+def append_to_gitignore_file(ignored_line):
     with open(".gitignore", "a") as gitignore_file:
-        gitignore_file.write(s)
-        gitignore_file.write(os.linesep)
+        gitignore_file.write(ignored_line)
+        gitignore_file.write("\n")
 
 
 def set_flags_in_envs(postgres_user, celery_flower_user, debug=False):
@@ -264,22 +384,14 @@ def set_flags_in_envs(postgres_user, celery_flower_user, debug=False):
     set_django_admin_url(production_django_envs_path)
 
     set_postgres_user(local_postgres_envs_path, value=postgres_user)
-    set_postgres_password(
-        local_postgres_envs_path, value=DEBUG_VALUE if debug else None
-    )
+    set_postgres_password(local_postgres_envs_path, value=DEBUG_VALUE if debug else None)
     set_postgres_user(production_postgres_envs_path, value=postgres_user)
-    set_postgres_password(
-        production_postgres_envs_path, value=DEBUG_VALUE if debug else None
-    )
+    set_postgres_password(production_postgres_envs_path, value=DEBUG_VALUE if debug else None)
 
     set_celery_flower_user(local_django_envs_path, value=celery_flower_user)
-    set_celery_flower_password(
-        local_django_envs_path, value=DEBUG_VALUE if debug else None
-    )
+    set_celery_flower_password(local_django_envs_path, value=DEBUG_VALUE if debug else None)
     set_celery_flower_user(production_django_envs_path, value=celery_flower_user)
-    set_celery_flower_password(
-        production_django_envs_path, value=DEBUG_VALUE if debug else None
-    )
+    set_celery_flower_password(production_django_envs_path, value=DEBUG_VALUE if debug else None)
 
 
 def set_flags_in_settings_files():
@@ -290,6 +402,7 @@ def set_flags_in_settings_files():
 def remove_envs_and_associated_files():
     shutil.rmtree(".envs")
     os.remove("merge_production_dotenvs_in_dotenv.py")
+    shutil.rmtree("tests")
 
 
 def remove_celery_compose_dirs():
@@ -308,20 +421,9 @@ def remove_aws_dockerfile():
 def remove_drf_starter_files():
     os.remove(os.path.join("config", "api_router.py"))
     shutil.rmtree(os.path.join("{{cookiecutter.project_slug}}", "users", "api"))
-    os.remove(
-        os.path.join(
-            "{{cookiecutter.project_slug}}", "users", "tests", "test_drf_urls.py"
-        )
-    )
-    os.remove(
-        os.path.join(
-            "{{cookiecutter.project_slug}}", "users", "tests", "test_drf_views.py"
-        )
-    )
-
-
-def remove_storages_module():
-    os.remove(os.path.join("{{cookiecutter.project_slug}}", "utils", "storages.py"))
+    os.remove(os.path.join("{{cookiecutter.project_slug}}", "users", "tests", "test_drf_urls.py"))
+    os.remove(os.path.join("{{cookiecutter.project_slug}}", "users", "tests", "test_drf_views.py"))
+    os.remove(os.path.join("{{cookiecutter.project_slug}}", "users", "tests", "test_swagger.py"))
 
 
 def main():
@@ -339,34 +441,31 @@ def main():
     if "{{ cookiecutter.open_source_license}}" != "GPLv3":
         remove_gplv3_files()
 
-    if "{{ cookiecutter.use_pycharm }}".lower() == "n":
+    if "{{ cookiecutter.username_type }}" == "username":
+        remove_custom_user_manager_files()
+
+    if "{{ cookiecutter.editor }}" != "PyCharm":
         remove_pycharm_files()
 
     if "{{ cookiecutter.use_docker }}".lower() == "y":
         remove_utility_files()
+        if "{{ cookiecutter.cloud_provider }}".lower() != "none":
+            remove_nginx_docker_files()
     else:
         remove_docker_files()
 
-    if (
-        "{{ cookiecutter.use_docker }}".lower() == "y"
-        and "{{ cookiecutter.cloud_provider}}".lower() != "aws"
-    ):
+    if "{{ cookiecutter.use_docker }}".lower() == "y" and "{{ cookiecutter.cloud_provider}}" != "AWS":
         remove_aws_dockerfile()
 
     if "{{ cookiecutter.use_heroku }}".lower() == "n":
         remove_heroku_files()
-    elif "{{ cookiecutter.use_compressor }}".lower() == "n":
-        remove_heroku_build_hooks()
 
-    if (
-        "{{ cookiecutter.use_docker }}".lower() == "n"
-        and "{{ cookiecutter.use_heroku }}".lower() == "n"
-    ):
+    if "{{ cookiecutter.use_docker }}".lower() == "n" and "{{ cookiecutter.use_heroku }}".lower() == "n":
         if "{{ cookiecutter.keep_local_envs_in_vcs }}".lower() == "y":
             print(
                 INFO + ".env(s) are only utilized when Docker Compose and/or "
-                "Heroku support is enabled so keeping them does not "
-                "make sense given your current setup." + TERMINATOR
+                "Heroku support is enabled so keeping them does not make sense "
+                "given your current setup." + TERMINATOR
             )
         remove_envs_and_associated_files()
     else:
@@ -375,32 +474,43 @@ def main():
         if "{{ cookiecutter.keep_local_envs_in_vcs }}".lower() == "y":
             append_to_gitignore_file("!.envs/.local/")
 
-    if "{{ cookiecutter.js_task_runner}}".lower() == "none":
+    if "{{ cookiecutter.frontend_pipeline }}" in ["None", "Django Compressor"]:
         remove_gulp_files()
+        remove_webpack_files()
+        remove_sass_files()
         remove_packagejson_file()
+        remove_prettier_pre_commit()
         if "{{ cookiecutter.use_docker }}".lower() == "y":
             remove_node_dockerfile()
+    else:
+        handle_js_runner(
+            "{{ cookiecutter.frontend_pipeline }}",
+            use_docker=("{{ cookiecutter.use_docker }}".lower() == "y"),
+            use_async=("{{ cookiecutter.use_async }}".lower() == "y"),
+        )
 
-    if "{{ cookiecutter.cloud_provider}}".lower() == "none":
+    if "{{ cookiecutter.cloud_provider }}" == "None" and "{{ cookiecutter.use_docker }}".lower() == "n":
         print(
-            WARNING + "You chose not to use a cloud provider, "
+            WARNING + "You chose to not use any cloud providers nor Docker, "
             "media files won't be served in production." + TERMINATOR
         )
-        remove_storages_module()
 
     if "{{ cookiecutter.use_celery }}".lower() == "n":
         remove_celery_files()
         if "{{ cookiecutter.use_docker }}".lower() == "y":
             remove_celery_compose_dirs()
 
-    if "{{ cookiecutter.ci_tool }}".lower() != "travis":
+    if "{{ cookiecutter.ci_tool }}" != "Travis":
         remove_dottravisyml_file()
 
-    if "{{ cookiecutter.ci_tool }}".lower() != "gitlab":
+    if "{{ cookiecutter.ci_tool }}" != "Gitlab":
         remove_dotgitlabciyml_file()
 
-    if "{{ cookiecutter.ci_tool }}".lower() != "github":
+    if "{{ cookiecutter.ci_tool }}" != "Github":
         remove_dotgithub_folder()
+
+    if "{{ cookiecutter.ci_tool }}" != "Drone":
+        remove_dotdrone_file()
 
     if "{{ cookiecutter.use_drf }}".lower() == "n":
         remove_drf_starter_files()

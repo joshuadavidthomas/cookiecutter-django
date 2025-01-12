@@ -1,36 +1,89 @@
-{% if cookiecutter.js_task_runner == 'Gulp' -%}
-FROM node:10-stretch-slim as client-builder
+{% if cookiecutter.frontend_pipeline in ['Gulp', 'Webpack'] -%}
+FROM docker.io/node:20-bookworm-slim AS client-builder
 
-WORKDIR /app
-COPY ./package.json /app
+ARG APP_HOME=/app
+WORKDIR ${APP_HOME}
+
+COPY ./package.json ${APP_HOME}
 RUN npm install && npm cache clean --force
-COPY . /app
+COPY . ${APP_HOME}
+{%- if cookiecutter.frontend_pipeline == 'Webpack' and cookiecutter.use_whitenoise == 'n' %}
+{%- if cookiecutter.cloud_provider == 'AWS' %}
+ARG DJANGO_AWS_STORAGE_BUCKET_NAME
+ENV DJANGO_AWS_STORAGE_BUCKET_NAME=${DJANGO_AWS_STORAGE_BUCKET_NAME}
+ARG DJANGO_AWS_S3_CUSTOM_DOMAIN
+ENV DJANGO_AWS_S3_CUSTOM_DOMAIN=${DJANGO_AWS_S3_CUSTOM_DOMAIN}
+{%- elif cookiecutter.cloud_provider == 'GCP' %}
+ARG DJANGO_GCP_STORAGE_BUCKET_NAME
+ENV DJANGO_GCP_STORAGE_BUCKET_NAME=${DJANGO_GCP_STORAGE_BUCKET_NAME}
+{%- elif cookiecutter.cloud_provider == 'Azure' %}
+ARG DJANGO_AZURE_ACCOUNT_NAME
+ENV DJANGO_AZURE_ACCOUNT_NAME=${DJANGO_AZURE_ACCOUNT_NAME}
+{%- endif %}
+{%- endif %}
 RUN npm run build
 
-# Python build stage
 {%- endif %}
-FROM python:3.8-slim-buster
+# define an alias for the specific python version used in this file.
+FROM docker.io/python:3.12.8-slim-bookworm AS python
 
-ENV PYTHONUNBUFFERED 1
+# Python build stage
+FROM python AS python-build-stage
 
-RUN apt-get update \
+ARG BUILD_ENVIRONMENT=production
+
+# Install apt packages
+RUN apt-get update && apt-get install --no-install-recommends -y \
   # dependencies for building Python packages
-  && apt-get install -y build-essential \
-  # psycopg2 dependencies
-  && apt-get install -y libpq-dev \
-  # Translations dependencies
-  && apt-get install -y gettext \
-  # cleaning up unused files
-  && apt-get purge -y --auto-remove -o APT::AutoRemove::RecommendsImportant=false \
-  && rm -rf /var/lib/apt/lists/*
+  build-essential \
+  # psycopg dependencies
+  libpq-dev
+
+
+# Requirements are installed here to ensure they will be cached.
+COPY ./requirements .
+
+# Create Python Dependency and Sub-Dependency Wheels.
+RUN pip wheel --wheel-dir /usr/src/app/wheels  \
+  -r ${BUILD_ENVIRONMENT}.txt
+
+
+# Python 'run' stage
+FROM python AS python-run-stage
+
+ARG BUILD_ENVIRONMENT=production
+ARG APP_HOME=/app
+
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV BUILD_ENV=${BUILD_ENVIRONMENT}
+
+WORKDIR ${APP_HOME}
 
 RUN addgroup --system django \
     && adduser --system --ingroup django django
 
-# Requirements are installed here to ensure they will be cached.
-COPY ./requirements /requirements
-RUN pip install --no-cache-dir -r /requirements/production.txt \
-    && rm -rf /requirements
+
+# Install required system dependencies
+RUN apt-get update && apt-get install --no-install-recommends -y \
+  # psycopg dependencies
+  libpq-dev \
+  # Translations dependencies
+  gettext \
+  # entrypoint
+  wait-for-it \
+  # cleaning up unused files
+  && apt-get purge -y --auto-remove -o APT::AutoRemove::RecommendsImportant=false \
+  && rm -rf /var/lib/apt/lists/*
+
+# All absolute dir copies ignore workdir instruction. All relative dir copies are wrt to the workdir instruction
+# copy python dependency wheels from python-build-stage
+COPY --from=python-build-stage /usr/src/app/wheels  /wheels/
+
+# use wheels to install python dependencies
+RUN pip install --no-cache-dir --no-index --find-links=/wheels/ /wheels/* \
+  && rm -rf /wheels/
+
 
 COPY --chown=django:django ./compose/production/django/entrypoint /entrypoint
 RUN sed -i 's/\r$//g' /entrypoint
@@ -53,19 +106,26 @@ RUN sed -i 's/\r$//g' /start-celerybeat
 RUN chmod +x /start-celerybeat
 
 
-COPY ./compose/production/django/celery/flower/start /start-flower
+COPY --chown=django:django ./compose/production/django/celery/flower/start /start-flower
 RUN sed -i 's/\r$//g' /start-flower
 RUN chmod +x /start-flower
 {%- endif %}
 
-{%- if cookiecutter.js_task_runner == 'Gulp' %}
-COPY --from=client-builder --chown=django:django /app /app
+
+# copy application code to WORKDIR
+{%- if cookiecutter.frontend_pipeline in ['Gulp', 'Webpack'] %}
+COPY --from=client-builder --chown=django:django ${APP_HOME} ${APP_HOME}
 {% else %}
-COPY --chown=django:django . /app
+COPY --chown=django:django . ${APP_HOME}
 {%- endif %}
+
+# make django owner of the WORKDIR directory as well.
+RUN chown -R django:django ${APP_HOME}
 
 USER django
 
-WORKDIR /app
+RUN DATABASE_URL="" \
+  DJANGO_SETTINGS_MODULE="config.settings.test" \
+  python manage.py compilemessages
 
 ENTRYPOINT ["/entrypoint"]
