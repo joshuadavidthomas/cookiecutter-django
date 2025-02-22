@@ -1,5 +1,7 @@
 import json
+import os
 from pathlib import Path
+
 from github import Github
 from github.NamedUser import NamedUser
 from jinja2 import Template
@@ -7,6 +9,8 @@ from jinja2 import Template
 CURRENT_FILE = Path(__file__)
 ROOT = CURRENT_FILE.parents[1]
 BOT_LOGINS = ["pyup-bot"]
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", None)
+GITHUB_REPO = os.getenv("GITHUB_REPOSITORY", None)
 
 
 def main() -> None:
@@ -36,19 +40,13 @@ def iter_recent_authors():
     """
     Fetch users who opened recently merged pull requests.
 
-    Use Github API to fetch recent authors rather than
-    git CLI to work with Github usernames.
+    Use GitHub API to fetch recent authors rather than
+    git CLI to work with GitHub usernames.
     """
-    repo = Github(per_page=5).get_repo("pydanny/cookiecutter-django")
-    recent_pulls = repo.get_pulls(
-        state="closed", sort="updated", direction="desc"
-    ).get_page(0)
+    repo = Github(login_or_token=GITHUB_TOKEN, per_page=5).get_repo(GITHUB_REPO)
+    recent_pulls = repo.get_pulls(state="closed", sort="updated", direction="desc").get_page(0)
     for pull in recent_pulls:
-        if (
-            pull.merged
-            and pull.user.type == "User"
-            and pull.user.login not in BOT_LOGINS
-        ):
+        if pull.merged and pull.user.type == "User" and pull.user.login not in BOT_LOGINS:
             yield pull.user
 
 
@@ -92,13 +90,13 @@ def write_md_file(contributors):
     core_contributors = [c for c in contributors if c.get("is_core", False)]
     other_contributors = (c for c in contributors if not c.get("is_core", False))
     other_contributors = sorted(other_contributors, key=lambda c: c["name"].lower())
-    content = template.render(
-        core_contributors=core_contributors, other_contributors=other_contributors
-    )
+    content = template.render(core_contributors=core_contributors, other_contributors=other_contributors)
 
     file_path = ROOT / "CONTRIBUTORS.md"
     file_path.write_text(content)
 
 
 if __name__ == "__main__":
+    if GITHUB_REPO is None:
+        raise RuntimeError("No github repo, please set the environment variable GITHUB_REPOSITORY")
     main()
